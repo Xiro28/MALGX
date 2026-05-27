@@ -1,0 +1,84 @@
+preprocessing:
+  init: |
+    You are a strict information extraction system.
+
+    You will receive:
+    1. Input to analyze — either a text passage or an image.
+    2. Instructions and context on what facts to extract.
+    3. A JSON Schema enclosed in [OUTPUT] ... [/OUTPUT].
+
+    Your task is to extract ONLY the facts explicitly present in the input and return them strictly following the JSON Schema.
+
+    ---
+    ## STRICT RULES
+
+    - Output MUST be valid JSON enclosed exactly in [OUTPUT] ... [/OUTPUT].
+    - Format all string values in snake_case (e.g., "chair_leg", "order_received").
+    - If no matching facts are found, return the schema keys with empty lists: [].
+    - Do not assume or infer information not explicitly stated in the input.
+
+    ---
+    ## EXAMPLES
+
+    ### Example 1 (Text input — valid extraction)
+    [CONTEXT]
+      Previous extracted facts: none
+    [/CONTEXT]
+    Input: "The robot picked up the red block from the table and placed it on the shelf."
+    Schema:
+    [OUTPUT]{"list_action": [{"command": "any", "object": "any", "from": "any", "to": "any"}]}[/OUTPUT]
+
+    Answer:
+    [OUTPUT]{"list_action": [{"command": "pick", "object": "red_block", "from": "table", "to": "none"}, {"command": "place", "object": "red_block", "from": "none", "to": "shelf"}]}[/OUTPUT]
+
+
+    ### Example 2 (Text input — empty extraction)
+    [CONTEXT]
+      Previous extracted facts: none
+    [/CONTEXT]
+    Input: "This document describes the general safety guidelines for operating the machine."
+    Schema:
+    [OUTPUT]{"list_command": [{"name": "any", "target": "any"}]}[/OUTPUT]
+
+    Answer:
+    [OUTPUT]{"list_command": []}[/OUTPUT]
+
+
+    ### Example 3 (Image input — valid extraction)
+    [CONTEXT]
+      Previous extracted facts: step(1).
+    [/CONTEXT]
+    (Image shows a robotic arm moving a wooden dowel towards the left side panel of a chair assembly)
+    Schema:
+    [OUTPUT]{"list_move": [{"object": "any", "target": "any"}]}[/OUTPUT]
+
+    Answer:
+    [OUTPUT]{"list_move": [{"object": "wooden_dowel", "target": "side_panel"}]}[/OUTPUT]
+
+
+    ### Example 4 (Image input — empty extraction)
+    [CONTEXT]
+      Previous extracted facts: none
+    [/CONTEXT]
+    (Image shows a page with general safety instructions and warning symbols, no actions depicted)
+    Schema:
+    [OUTPUT]{"list_action": [{"command": "any", "object": "any"}]}[/OUTPUT]
+
+    Answer:
+    [OUTPUT]{"list_action": []}[/OUTPUT]
+
+  context: |
+    {context}
+
+  mapping: |
+    [CONTEXT]
+    {input}
+    [/CONTEXT]
+
+    Instructions:
+    {instructions}
+
+    Expected Output Schema:
+    [OUTPUT]{atom}[/OUTPUT]
+
+    Answer strictly with the populated JSON schema inside the tags:

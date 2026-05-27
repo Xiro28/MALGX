@@ -1,0 +1,35 @@
+[tool.poetry]
+name = "vlgx"
+version = "0.1.0"
+description = ""
+authors = ["Lorenzo"]
+readme = "README.md"
+packages = [
+    { include = "src/*.py" }
+]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+ollama = "^0.6.1"
+pyyaml = "^6.0.3"
+typeguard = "^4.4.4"
+dumbo-asp = "^0.3.17"
+streamlit = "^1.53.0"
+pandas = "^2.3.3"
+plotly = "^6.5.2"
+matplotlib = "^3.10.8"
+tqdm = "^4.67.1"
+pdf2image = "^1.17.0"
+fitz = "^0.0.1.dev2"
+frontend = "^0.0.3"
+pypdfium2 = "^5.8.0"
+fastapi = "^0.136.1"
+uvicorn = {extras = ["standard"], version = "^0.47.0"}
+python-multipart = "^0.0.28"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+

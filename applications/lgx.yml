@@ -1,0 +1,65 @@
+context: null
+
+strings: null
+    
+extract:
+
+- assembly_page(bool[y|n]): 
+    types: str
+    prompt: Determine if the page contains an assembly step diagram (y) or it is empty of assembly instructions (n). 
+    knowledge_base: |
+        #show assembly_page/1.
+
+- step(number): 
+    types: int
+    prompt: |
+        Extract the steps shown inside the page.
+    condition: assembly_page(y)
+    knowledge_base: |
+        #show step/1.
+
+- repetition($step, count): 
+    types: int int
+    prompt: |
+        Identify if the step at the specified number involves a repeated action (e.g. "6x" dowels being inserted) and extract the repetition count.
+    condition: assembly_page(y)
+    knowledge_base: |
+       inconsistent_repetition(S) :- repetition(S, C), C > 1, not step(S).
+       inconsistent_repetition(S) :- not repetition(S, _), step(S).
+       invalid_repetition(S) :- repetition(S, C), C < 1.
+
+       #show inconsistent_repetition/1.
+       #show invalid_repetition/1.
+       #show repetition/2.
+
+- robot_command($step, order, command_name[pick|move|align|insert|rotate|place|release], object[tool|screw|screw_medium|screw_long|dowel|panel|side_frame|leg|washer|barrel_nut|nut], from, to, description):
+    types: int int str str str str str
+    prompt: |
+        Analyze the assembly action shown at step {{{step}}} and decompose it into an ordered sequence of atomic robot commands.
+        If the step shows multiple identical sub-actions (e.g. "6x" dowels being inserted), describe a single representative sequence and note the repetition count in the description. 
+        
+        For each command, provide:
+          - 'order': a sequential integer representing its micro-step position in the execution sequence for this macro step.
+          - 'command_name': exactly one of the allowed commands: pick, move, align, insert, rotate, place, release.
+          - 'object': the identifier of the object being manipulated (e.g. peg_a, screw_b, panel_1).
+          - 'from': the starting location of the action (e.g. table, hole_1). MUST be 'none' if the action does not involve moving from a specific starting location (e.g., during align, insert, rotate).
+          - 'to': the target location of the action (e.g. hole_2). MUST be 'none' if the action does not involve a destination or if it's a release action.
+          - 'description': a short sentence describing what the command does in context, including relevant details (e.g. direction).
+
+        IMPORTANT:
+          - Extract commands ONLY from the numbered step diagram, NOT from parts inventory rows.
+          - Every command sequence should logically start with 'pick' and end with 'release' unless the object remains held for the next step.
+    condition: assembly_page(y), not inconsistent_repetition(_), not invalid_repetition(_)
+    knowledge_base: |
+
+        missing_commands(S) :- step(S), not robot_command(S, _, _, _, _, _, _).
+        orders_incomplete(S, ONEXT) :- robot_command(S, O1, _, _, _, _, _), ONEXT = O1 + 1, robot_command(S, O2, _, _, _, _, _), O1 < O2 - 1, not robot_command(S, ONEXT, _, _, _, _, _).
+        step_not_existent(S) :-  not step(S), robot_command(S, _, _, _, _, _, _).
+
+        #show robot_command/7.
+        #show missing_commands/1.
+        #show orders_incomplete/2.
+        #show step_not_existent/1.
+
+knowledge_base: null
+outcome: null

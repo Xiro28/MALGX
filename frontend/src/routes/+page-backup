@@ -1,0 +1,746 @@
+<script lang="ts">
+	import { onMount } from 'svelte';
+
+	import { Engine } from '@babylonjs/core/Engines/engine';
+	import { Scene } from '@babylonjs/core/scene';
+	import { Vector3 } from '@babylonjs/core/Maths/math.vector';
+	import { Color3, Color4 } from '@babylonjs/core/Maths/math.color';
+
+	import { ArcRotateCamera } from '@babylonjs/core/Cameras/arcRotateCamera';
+	import { HemisphericLight } from '@babylonjs/core/Lights/hemisphericLight';
+	import { DirectionalLight } from '@babylonjs/core/Lights/directionalLight';
+
+	import { MeshBuilder } from '@babylonjs/core/Meshes/meshBuilder';
+	import type { Mesh } from '@babylonjs/core/Meshes/mesh';
+	import { StandardMaterial } from '@babylonjs/core/Materials/standardMaterial';
+
+	type CommandDescription = {
+		step: string;
+		robot_command?: string;
+		description: string;
+	};
+
+	const output = {
+		list_command_description: [
+			{
+				step: '1',
+				robot_command: 'pick',
+				description: 'pick up a wooden dowel (part 128832)'
+			},
+			{
+				step: '1',
+				robot_command: 'move',
+				description: 'move the wooden dowel (part 128832) to the pre-drilled hole on the frame'
+			},
+			{
+				step: '1',
+				description: 'insert the wooden dowel (part 128832) into the pre-drilled hole on the frame'
+			}
+		]
+	};
+
+	const aspResult = `step(1).
+robot_command(1,1,pick).
+robot_command(1,2,move).
+robot_command(1,3,insert).`;
+
+	const applicationFile = `context: null
+
+strings: null
+    
+extract:
+
+- info_page(description): 
+    prompt: |
+        Detect if the page is not a step page but an informational page that provides general instructions or context for the assembly process.
+    knowledge_base: |
+        #show info_page/1.
+
+- step(number): 
+    prompt: |
+        Extract the steps (specified as a number) shown inside the page.
+    condition: not info_page(_)
+    knowledge_base: |
+        #show step/1.
+
+- robot_command($step, order, command_name):
+    prompt: |
+        Identify the main robotic commands required to complete the action at step {{{step}}}.
+        Decompose each assembly action into the ORDERED sequence of atomic robot commands needed to execute it.
+        For every command, assign a sequential integer 'order' (1, 2, 3, ...) representing its position in the execution sequence of that step.
+        Use ONLY specific command keywords like: move, pick, place, rotate, insert, release.
+
+        Example — inserting a screw into a hole at a given step produces the following ordered sequence:
+            robot_command(step_number, 1, pick).    % take the screw
+            robot_command(step_number, 2, move).    % move the arm to the hole
+            robot_command(step_number, 3, insert).  % insert the screw
+            robot_command(step_number, 4, rotate).  % rotate/tighten the screw
+
+        Example — placing a steel bar over a piece:
+            robot_command(step_number, 1, pick).    % grasp the steel bar
+            robot_command(step_number, 2, move).    % move the arm above the target piece
+            robot_command(step_number, 3, place).   % place the bar over the piece
+            robot_command(step_number, 4, release). % release the bar
+
+        If the same command appears more than once in a step (e.g. two 'move' commands), each occurrence MUST receive its own distinct 'order' value reflecting when it happens in the sequence.
+        Make sure every visible sub-action of the step is decomposed into the corresponding ordered commands, with no gaps in the numbering.
+    condition: not info_page(_)
+    knowledge_base: |
+        #show robot_command/3.
+
+- command_description($step, $robot_command:order, $robot_command:command_name, description): 
+    prompt: |
+        Describe the execution details of the command '{{{command_name}}}' executed at position {{{order}}} of step {{{step}}}.
+        The description MUST be consistent with the role this command plays in the ordered sequence
+        (e.g. a 'pick' at order 1 grasps the object; a subsequent 'move' carries that object to its target; a final 'rotate' tightens the previously inserted screw).
+        Extract all the parameters needed to execute it, such as:
+          - the object involved (e.g. screw, leg, bar),
+          - the target location or reference frame (e.g. hole A, top of piece B),
+          - the direction (e.g. clockwise, downward),
+          - the amount of movement or rotation (e.g. 90 degrees, 5 cm),
+          - any tool required.
+        Produce one description for each (step, order, command_name) triple emitted by robot_command, preserving its position in the sequence.
+    condition: not info_page(_)
+    knowledge_base: |
+        #show command_description/4.
+
+
+knowledge_base: |
+    % Link the step, the command, and its parameter description
+    
+    valid_command(Step, Command, Description) :-
+        step(Step),
+        robot_command(Step, Command),
+        command_description(Step, Command, Description).
+
+    % Mostriamo i comandi validi estratti
+    #show robot_command/2.
+    #show command_description/3.
+
+outcome: null`;
+
+	let canvas: HTMLCanvasElement;
+
+	let engine: Engine | null = null;
+	let scene: Scene | null = null;
+
+	let dowel: Mesh | null = null;
+	let frame: Mesh | null = null;
+	let hole: Mesh | null = null;
+	let gripperLeft: Mesh | null = null;
+	let gripperRight: Mesh | null = null;
+
+	let currentCommandIndex = -1;
+	let isPlaying = false;
+	let statusText = 'Ready';
+
+	const commands: CommandDescription[] = output.list_command_description;
+
+	const startPosition = new Vector3(-3.2, 0.8, 0);
+	const pickedPosition = new Vector3(-3.2, 1.65, 0);
+	const movedPosition = new Vector3(-0.95, 1.65, 0);
+	const insertedPosition = new Vector3(-0.28, 1.15, 0);
+
+	function commandName(command: CommandDescription, index: number) {
+		return command.robot_command ?? inferCommandFromDescription(command.description) ?? `command-${index + 1}`;
+	}
+
+	function inferCommandFromDescription(description: string) {
+		const lower = description.toLowerCase();
+
+		if (lower.includes('pick')) return 'pick';
+		if (lower.includes('move')) return 'move';
+		if (lower.includes('insert')) return 'insert';
+		if (lower.includes('place')) return 'place';
+		if (lower.includes('rotate')) return 'rotate';
+		if (lower.includes('release')) return 'release';
+
+		return null;
+	}
+
+	function setActiveCommand(index: number) {
+		currentCommandIndex = index;
+
+		const command = commands[index];
+		const name = commandName(command, index);
+
+		statusText = `Step ${command.step} — ${name}: ${command.description}`;
+	}
+
+	function resetScene() {
+		currentCommandIndex = -1;
+		isPlaying = false;
+		statusText = 'Ready';
+
+		if (dowel) {
+			dowel.position = startPosition.clone();
+			dowel.rotation = new Vector3(0, 0, Math.PI / 2);
+		}
+
+		if (gripperLeft && gripperRight) {
+			gripperLeft.position = new Vector3(-3.2, 1.25, -0.28);
+			gripperRight.position = new Vector3(-3.2, 1.25, 0.28);
+		}
+	}
+
+	function sleep(ms: number) {
+		return new Promise<void>((resolve) => {
+			window.setTimeout(resolve, ms);
+		});
+	}
+
+	function easeInOut(t: number) {
+		return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+	}
+
+	function animateMeshTo(mesh: Mesh, target: Vector3, duration = 900) {
+		return new Promise<void>((resolve) => {
+			const from = mesh.position.clone();
+			const startedAt = performance.now();
+
+			function frameAnimation(now: number) {
+				const elapsed = now - startedAt;
+				const t = Math.min(elapsed / duration, 1);
+				const eased = easeInOut(t);
+
+				mesh.position = Vector3.Lerp(from, target, eased);
+
+				if (t < 1) {
+					requestAnimationFrame(frameAnimation);
+				} else {
+					mesh.position = target.clone();
+					resolve();
+				}
+			}
+
+			requestAnimationFrame(frameAnimation);
+		});
+	}
+
+	async function animateGripperTo(target: Vector3, duration = 900) {
+		if (!gripperLeft || !gripperRight) return;
+
+		await Promise.all([
+			animateMeshTo(gripperLeft, new Vector3(target.x, target.y, target.z - 0.28), duration),
+			animateMeshTo(gripperRight, new Vector3(target.x, target.y, target.z + 0.28), duration)
+		]);
+	}
+
+	async function playCommand(index: number) {
+		if (!dowel) return;
+
+		const command = commands[index];
+		const name = commandName(command, index);
+
+		setActiveCommand(index);
+
+		if (name === 'pick') {
+			await animateGripperTo(new Vector3(startPosition.x, 1.25, startPosition.z), 500);
+			await sleep(250);
+			await Promise.all([
+				animateMeshTo(dowel, pickedPosition, 900),
+				animateGripperTo(new Vector3(pickedPosition.x, pickedPosition.y + 0.45, pickedPosition.z), 900)
+			]);
+			return;
+		}
+
+		if (name === 'move') {
+			await Promise.all([
+				animateMeshTo(dowel, movedPosition, 1200),
+				animateGripperTo(new Vector3(movedPosition.x, movedPosition.y + 0.45, movedPosition.z), 1200)
+			]);
+			return;
+		}
+
+		if (name === 'insert') {
+			await Promise.all([
+				animateMeshTo(dowel, insertedPosition, 1000),
+				animateGripperTo(new Vector3(insertedPosition.x, insertedPosition.y + 0.45, insertedPosition.z), 1000)
+			]);
+			await sleep(250);
+			await animateGripperTo(new Vector3(insertedPosition.x, insertedPosition.y + 1.3, insertedPosition.z), 700);
+			return;
+		}
+
+		await sleep(500);
+	}
+
+	async function playAll() {
+		if (isPlaying) return;
+
+		resetScene();
+		isPlaying = true;
+
+		for (let i = 0; i < commands.length; i += 1) {
+			if (!isPlaying) break;
+			await playCommand(i);
+			await sleep(350);
+		}
+
+		isPlaying = false;
+	}
+
+	async function playSingle(index: number) {
+		if (isPlaying) return;
+
+		isPlaying = true;
+		await playCommand(index);
+		isPlaying = false;
+	}
+
+	onMount(() => {
+		engine = new Engine(canvas, true, {
+			preserveDrawingBuffer: true,
+			stencil: true,
+			antialias: true
+		});
+
+		scene = new Scene(engine);
+		scene.clearColor = new Color4(0.02, 0.03, 0.08, 1);
+
+		const camera = new ArcRotateCamera(
+			'main-camera',
+			Math.PI / 4,
+			Math.PI / 3,
+			7,
+			new Vector3(0, 0.9, 0),
+			scene
+		);
+
+		camera.attachControl(canvas, true);
+		camera.lowerRadiusLimit = 3;
+		camera.upperRadiusLimit = 14;
+		camera.wheelDeltaPercentage = 0.01;
+
+		const hemiLight = new HemisphericLight('hemi-light', new Vector3(0, 1, 0), scene);
+		hemiLight.intensity = 0.75;
+
+		const dirLight = new DirectionalLight('dir-light', new Vector3(-1, -2, -1), scene);
+		dirLight.position = new Vector3(4, 6, 4);
+		dirLight.intensity = 0.85;
+
+		const frameMaterial = new StandardMaterial('frame-material', scene);
+		frameMaterial.diffuseColor = new Color3(0.72, 0.48, 0.26);
+		frameMaterial.specularColor = new Color3(0.15, 0.12, 0.1);
+
+		const dowelMaterial = new StandardMaterial('dowel-material', scene);
+		dowelMaterial.diffuseColor = new Color3(0.9, 0.72, 0.46);
+		dowelMaterial.specularColor = new Color3(0.18, 0.15, 0.1);
+
+		const holeMaterial = new StandardMaterial('hole-material', scene);
+		holeMaterial.diffuseColor = new Color3(0.04, 0.04, 0.045);
+		holeMaterial.specularColor = new Color3(0.01, 0.01, 0.01);
+
+		const gripperMaterial = new StandardMaterial('gripper-material', scene);
+		gripperMaterial.diffuseColor = new Color3(0.75, 0.8, 0.92);
+		gripperMaterial.specularColor = new Color3(0.3, 0.3, 0.35);
+
+		const groundMaterial = new StandardMaterial('ground-material', scene);
+		groundMaterial.diffuseColor = new Color3(0.12, 0.16, 0.25);
+		groundMaterial.specularColor = new Color3(0.05, 0.05, 0.08);
+
+		frame = MeshBuilder.CreateBox(
+			'frame',
+			{
+				width: 1.8,
+				height: 1.2,
+				depth: 2.4
+			},
+			scene
+		);
+		frame.position = new Vector3(0, 0.75, 0);
+		frame.material = frameMaterial;
+
+		hole = MeshBuilder.CreateCylinder(
+			'pre-drilled-hole',
+			{
+				diameter: 0.34,
+				height: 0.05,
+				tessellation: 48
+			},
+			scene
+		);
+		hole.position = new Vector3(-0.93, 1.15, 0);
+		hole.rotation.z = Math.PI / 2;
+		hole.material = holeMaterial;
+
+		dowel = MeshBuilder.CreateCylinder(
+			'wooden-dowel-part-128832',
+			{
+				diameter: 0.22,
+				height: 1.25,
+				tessellation: 48
+			},
+			scene
+		);
+		dowel.position = startPosition.clone();
+		dowel.rotation.z = Math.PI / 2;
+		dowel.material = dowelMaterial;
+
+		gripperLeft = MeshBuilder.CreateBox(
+			'robot-gripper-left',
+			{
+				width: 0.12,
+				height: 0.45,
+				depth: 0.12
+			},
+			scene
+		);
+		gripperLeft.position = new Vector3(-3.2, 1.25, -0.28);
+		gripperLeft.material = gripperMaterial;
+
+		gripperRight = MeshBuilder.CreateBox(
+			'robot-gripper-right',
+			{
+				width: 0.12,
+				height: 0.45,
+				depth: 0.12
+			},
+			scene
+		);
+		gripperRight.position = new Vector3(-3.2, 1.25, 0.28);
+		gripperRight.material = gripperMaterial;
+
+		const ground = MeshBuilder.CreateGround(
+			'ground',
+			{
+				width: 10,
+				height: 10,
+				subdivisions: 10
+			},
+			scene
+		);
+		ground.material = groundMaterial;
+
+		engine.runRenderLoop(() => {
+			scene?.render();
+		});
+
+		const handleResize = () => {
+			engine?.resize();
+		};
+
+		window.addEventListener('resize', handleResize);
+
+		return () => {
+			window.removeEventListener('resize', handleResize);
+			scene?.dispose();
+			engine?.dispose();
+		};
+	});
+</script>
+
+<svelte:head>
+	<title>Assembly Instruction 3D Viewer</title>
+</svelte:head>
+
+<main class="page">
+	<section class="sidebar">
+		<p class="eyebrow">Prototype</p>
+
+		<h1>Assembly Instruction 3D Viewer</h1>
+
+		<p class="description">
+			Visualizzazione 3D basata direttamente sull'output fornito: pick, move e insert del wooden
+			dowel part 128832 nel pre-drilled hole on the frame.
+		</p>
+
+		<div class="controls">
+			<button type="button" onclick={playAll} disabled={isPlaying}>
+				Play sequence
+			</button>
+
+			<button type="button" class="secondary" onclick={resetScene} disabled={isPlaying}>
+				Reset
+			</button>
+		</div>
+
+		<div class="status">
+			<p>{statusText}</p>
+		</div>
+
+		<div class="commands">
+			<h2>list_command_description</h2>
+
+			{#each commands as command, index}
+				<button
+					type="button"
+					class:active={currentCommandIndex === index}
+					class="command-card"
+					onclick={() => playSingle(index)}
+					disabled={isPlaying}
+				>
+					<span class="command-top">
+						<span>Step {command.step}</span>
+						<span>{commandName(command, index)}</span>
+					</span>
+
+					<span class="command-description">
+						{command.description}
+					</span>
+				</button>
+			{/each}
+		</div>
+
+		<details class="debug">
+			<summary>Result</summary>
+			<pre>{aspResult}</pre>
+		</details>
+
+		<details class="debug">
+			<summary>Application file</summary>
+			<pre>{applicationFile}</pre>
+		</details>
+	</section>
+
+	<section class="viewer">
+		<canvas bind:this={canvas}></canvas>
+
+		<div class="viewer-label">
+			<div>
+				<strong>wooden dowel</strong>
+				<span>part 128832</span>
+			</div>
+
+			<div>
+				<strong>target</strong>
+				<span>pre-drilled hole on the frame</span>
+			</div>
+		</div>
+	</section>
+</main>
+
+<style>
+	:global(body) {
+		margin: 0;
+		font-family:
+			Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+			sans-serif;
+		background: #0f172a;
+		color: #e5e7eb;
+	}
+
+	:global(*) {
+		box-sizing: border-box;
+	}
+
+	.page {
+		min-height: 100vh;
+		display: grid;
+		grid-template-columns: 430px 1fr;
+	}
+
+	.sidebar {
+		height: 100vh;
+		overflow: auto;
+		padding: 28px;
+		background: #111827;
+		border-right: 1px solid rgba(255, 255, 255, 0.08);
+	}
+
+	.eyebrow {
+		margin: 0 0 12px;
+		color: #93c5fd;
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		font-size: 0.75rem;
+		font-weight: 700;
+	}
+
+	h1 {
+		margin: 0;
+		font-size: 1.9rem;
+		line-height: 1.1;
+	}
+
+	.description {
+		margin-top: 16px;
+		color: #cbd5e1;
+		line-height: 1.6;
+	}
+
+	.controls {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+		gap: 12px;
+		margin-top: 24px;
+	}
+
+	button {
+		border: 0;
+		border-radius: 12px;
+		padding: 12px 16px;
+		background: #4f46e5;
+		color: white;
+		font-weight: 700;
+		cursor: pointer;
+	}
+
+	button:hover:not(:disabled) {
+		background: #4338ca;
+	}
+
+	button:disabled {
+		opacity: 0.5;
+		cursor: not-allowed;
+	}
+
+	button.secondary {
+		background: #334155;
+	}
+
+	button.secondary:hover:not(:disabled) {
+		background: #475569;
+	}
+
+	.status {
+		margin-top: 16px;
+		padding: 14px;
+		border-radius: 14px;
+		background: rgba(15, 23, 42, 0.85);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		color: #cbd5e1;
+		font-size: 0.92rem;
+		line-height: 1.5;
+	}
+
+	.status p {
+		margin: 0;
+	}
+
+	.commands {
+		margin-top: 24px;
+	}
+
+	.commands h2 {
+		margin: 0 0 12px;
+		font-size: 1rem;
+		color: #e2e8f0;
+	}
+
+	.command-card {
+		width: 100%;
+		display: block;
+		margin-bottom: 12px;
+		padding: 14px;
+		text-align: left;
+		border-radius: 14px;
+		background: rgba(255, 255, 255, 0.06);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		color: #e5e7eb;
+	}
+
+	.command-card:hover:not(:disabled),
+	.command-card.active {
+		background: rgba(79, 70, 229, 0.25);
+		border-color: rgba(129, 140, 248, 0.6);
+	}
+
+	.command-top {
+		display: flex;
+		justify-content: space-between;
+		gap: 12px;
+		margin-bottom: 8px;
+		color: #93c5fd;
+		font-size: 0.78rem;
+		font-weight: 800;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+	}
+
+	.command-description {
+		display: block;
+		color: #cbd5e1;
+		font-size: 0.92rem;
+		line-height: 1.45;
+	}
+
+	.debug {
+		margin-top: 16px;
+		border-radius: 14px;
+		background: rgba(255, 255, 255, 0.05);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		overflow: hidden;
+	}
+
+	.debug summary {
+		padding: 12px 14px;
+		cursor: pointer;
+		font-weight: 700;
+		color: #e2e8f0;
+	}
+
+	pre {
+		margin: 0;
+		padding: 14px;
+		overflow: auto;
+		max-height: 300px;
+		background: rgba(2, 6, 23, 0.75);
+		color: #cbd5e1;
+		font-size: 0.78rem;
+		line-height: 1.45;
+	}
+
+	.viewer {
+		position: relative;
+		min-height: 100vh;
+		background:
+			radial-gradient(circle at top, rgba(79, 70, 229, 0.25), transparent 35%),
+			#020617;
+	}
+
+	canvas {
+		display: block;
+		width: 100%;
+		height: 100%;
+		outline: none;
+		touch-action: none;
+	}
+
+	.viewer-label {
+		position: absolute;
+		left: 24px;
+		right: 24px;
+		bottom: 24px;
+		display: flex;
+		flex-wrap: wrap;
+		gap: 12px;
+		pointer-events: none;
+	}
+
+	.viewer-label div {
+		padding: 12px 14px;
+		border-radius: 14px;
+		background: rgba(15, 23, 42, 0.82);
+		border: 1px solid rgba(255, 255, 255, 0.1);
+		backdrop-filter: blur(10px);
+	}
+
+	.viewer-label strong {
+		display: block;
+		color: #e5e7eb;
+	}
+
+	.viewer-label span {
+		display: block;
+		margin-top: 4px;
+		color: #cbd5e1;
+		font-size: 0.88rem;
+	}
+
+	@media (max-width: 950px) {
+		.page {
+			grid-template-columns: 1fr;
+		}
+
+		.sidebar {
+			height: auto;
+			border-right: 0;
+			border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+		}
+
+		.viewer {
+			min-height: 65vh;
+		}
+	}
+</style>
